@@ -14,12 +14,13 @@ from cgt_calc.exceptions import (
     UnsupportedBrokerActionError,
     UnsupportedBrokerCurrencyError,
 )
-from cgt_calc.model import ActionType
+from cgt_calc.model import ActionType, BrokerTransaction
 from cgt_calc.parsers.freetrade import (
     COLUMNS,
     FreetradeColumn,
     FreetradeParser,
     FreetradeTransaction,
+    _with_tbill_redemptions,
 )
 from tests.utils import build_cmd, report_path, stderr_alerts
 
@@ -579,3 +580,156 @@ def test_freetrade_transaction_unsupported_action(
         match="Unsupported Freetrade action 'ADJUSTMENT'",
     ):
         FreetradeTransaction(dict(zip(COLUMNS, row, strict=True)), dummy_file)
+
+
+# ── Treasury bill redemptions ─────────────────────────────────────────────────
+
+
+def _tbill_row(
+    title: str, timestamp: str, isin: str, face: str, cost: str
+) -> list[str]:
+    """Build a T-bill purchase as Freetrade writes it.
+
+    The ISIN sits in the Ticker column, and the quantity is the £1-per-unit
+    face value the bill will redeem for.
+    """
+    return _default_row(
+        {
+            FreetradeColumn.TITLE.value: title,
+            FreetradeColumn.TIMESTAMP.value: timestamp,
+            FreetradeColumn.TICKER.value: isin,
+            FreetradeColumn.ISIN.value: isin,
+            FreetradeColumn.QUANTITY.value: face,
+            FreetradeColumn.TOTAL_AMOUNT.value: cost,
+            FreetradeColumn.PRICE_PER_SHARE_ACCOUNT.value: str(
+                Decimal(cost) / Decimal(face)
+            ),
+        }
+    )
+
+
+# Exports are newest first, so a rolled ladder reads bottom-up.
+LADDER = [
+    _tbill_row(
+        "UK T-Bill 12/08/24",
+        "2024-07-12T07:42:00",
+        "GB00BP24DZ03",
+        "3060.07",
+        "3047.95",
+    ),
+    _tbill_row(
+        "UK T-Bill 15/07/24",
+        "2024-06-14T07:47:48",
+        "GB00BP243M73",
+        "3047.95",
+        "3035.83",
+    ),
+]
+
+
+def test_tbill_redeems_on_the_purchase_its_face_value_paid_for(tmp_path: Path) -> None:
+    """Freetrade posts no maturity row; the next bill's cost identifies it."""
+    transactions = FreetradeParser().load_from_file(
+        _write_csv(tmp_path, COLUMNS, LADDER)
+    )
+
+    redemptions = [t for t in transactions if t.action is ActionType.SELL]
+    assert len(redemptions) == 2
+    first = redemptions[0]
+    # The June bill redeemed at face on the day the July bill was bought.
+    assert first.date == date(2024, 7, 12)
+    assert first.symbol == "GB00BP243M73"
+    assert first.quantity == Decimal("3047.95")
+    assert first.price == Decimal(1)
+    assert first.amount == Decimal("3047.95")
+    assert first.fees == Decimal(0)
+    # It has to be seen before the purchase it paid for.
+    same_day = [t for t in transactions if t.date == date(2024, 7, 12)]
+    assert [t.action for t in same_day] == [ActionType.SELL, ActionType.BUY]
+    # The last bill has no successor, so its title date is used instead.
+    assert redemptions[1].date == date(2024, 8, 12)
+
+
+def _redemptions_as_of(
+    tmp_path: Path, rows: list[list[str]], today: date
+) -> list[BrokerTransaction]:
+    """Redemptions the parser would synthesise on a given day.
+
+    load_from_file already applies today's date, so the purchases are taken
+    back out of its result and re-resolved against the date under test.
+    """
+    parsed = FreetradeParser().load_from_file(_write_csv(tmp_path, COLUMNS, rows))
+    purchases = [t for t in parsed if t.action is ActionType.BUY]
+    return [
+        t
+        for t in _with_tbill_redemptions(purchases, today=today)
+        if t.action is ActionType.SELL
+    ]
+
+
+def test_tbill_still_held_is_not_redeemed(tmp_path: Path) -> None:
+    """A bill whose maturity hasn't arrived is a real holding, not cash."""
+    transactions = _redemptions_as_of(tmp_path, LADDER, date(2024, 7, 20))
+
+    # Only the June bill, which the July purchase proves matured.
+    assert [t.symbol for t in transactions] == ["GB00BP243M73"]
+
+
+def test_two_tbills_merged_into_one_purchase_both_redeem(tmp_path: Path) -> None:
+    """Two ladders rolled into a single bill: the costs sum."""
+    rows = [
+        _tbill_row(
+            "UK T-Bill 09/03/26",
+            "2026-02-06T08:40:54",
+            "GB00BSGM1W44",
+            "4362.57",
+            "4350.58",
+        ),
+        _tbill_row(
+            "UK T-Bill 09/02/26",
+            "2026-01-09T08:03:14",
+            "GB00BSGNGR75",
+            "1090.54",
+            "1087.45",
+        ),
+        _tbill_row(
+            "UK T-Bill 09/02/26",
+            "2026-01-09T08:03:14",
+            "GB00BSGNGR75",
+            "3260.04",
+            "3250.81",
+        ),
+    ]
+
+    redemptions = _redemptions_as_of(tmp_path, rows, date(2026, 2, 10))
+
+    # Both January bills matured into the February purchase, which cost their
+    # two face values added together.
+    assert {t.quantity for t in redemptions} == {Decimal("1090.54"), Decimal("3260.04")}
+    assert {t.date for t in redemptions} == {date(2026, 2, 6)}
+
+
+def test_a_title_date_that_cannot_be_a_maturity_is_ignored(tmp_path: Path) -> None:
+    """Some titles carry the purchase date, or a typo a year out."""
+    rows = [
+        _tbill_row(
+            "UK T-Bill 23/06/26",
+            "2025-05-23T08:18:26",
+            "GB00BSGJG649",
+            "3181.59",
+            "3171.61",
+        ),
+    ]
+
+    (redemption,) = _redemptions_as_of(tmp_path, rows, date(2025, 12, 31))
+    # 200 days out is no maturity for a bill, so the assumed 28-day term wins.
+    assert redemption.date == date(2025, 6, 20)
+
+
+def test_non_tbill_purchases_are_left_alone(tmp_path: Path) -> None:
+    """An ordinary share purchase gains no redemption row."""
+    transactions = FreetradeParser().load_from_file(
+        _write_csv(tmp_path, COLUMNS, [_default_row()])
+    )
+
+    assert [t.action for t in transactions] == [ActionType.BUY]

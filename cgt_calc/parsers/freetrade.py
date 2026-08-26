@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import csv
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from itertools import combinations
 import logging
+import re
 from typing import TYPE_CHECKING, ClassVar, Final, TextIO, override
 
 from cgt_calc.const import UK_TIMEZONE
@@ -259,6 +261,147 @@ class FreetradeTransaction(BrokerTransaction):
         )
 
 
+# ── Treasury bill redemptions ─────────────────────────────────────────────────
+# Freetrade posts a row when a Treasury bill is bought and none when it matures:
+# the cash simply reappears, and is usually spent the same day on the next bill.
+# Left alone that breaks two things at once — the cash balance falls by the whole
+# ladder, and every bill ever bought stays in the pool for ever. Bills redeem at
+# £1 per unit, so a purchase's quantity IS its face value in pounds, and the
+# redemption is reconstructed here.
+_TBILL_TITLE: Final = re.compile(
+    r"\b(?:uk\s+)?t-?bills?\b|\btreasury\s+bills?\b", re.IGNORECASE
+)
+# "UK T-Bill 29/06/26". The title carries a date, but it is a poor maturity: in
+# real exports it runs a few days after the roll, and some titles hold the
+# purchase date instead. It is only consulted for a bill nothing else explains.
+_TBILL_TITLE_DATE: Final = re.compile(r"(\d{2})/(\d{2})/(\d{2,4})")
+# UK bills run 1-6 months, so a title date outside that window is a typo.
+_TBILL_MAX_TERM: Final = timedelta(days=200)
+# Fallback term for a matured bill with no successor and no usable title date.
+_TBILL_ASSUMED_TERM: Final = timedelta(days=28)
+# A two-digit year in a title is this century.
+_CENTURY: Final = 100
+
+
+def _is_tbill_purchase(transaction: BrokerTransaction) -> bool:
+    return (
+        transaction.action is ActionType.BUY
+        and transaction.quantity is not None
+        and transaction.amount is not None
+        and bool(_TBILL_TITLE.search(transaction.description))
+    )
+
+
+def _tbill_title_maturity(transaction: BrokerTransaction) -> date | None:
+    """Read the maturity out of a bill's title, if it is a plausible one."""
+    match = _TBILL_TITLE_DATE.search(transaction.description)
+    if match is None:
+        return None
+    day, month, year = (int(part) for part in match.groups())
+    if year < _CENTURY:
+        year += 2000
+    try:
+        titled = date(year, month, day)
+    except ValueError:
+        return None
+    if transaction.date < titled <= transaction.date + _TBILL_MAX_TERM:
+        return titled
+    return None
+
+
+def _funded_by(
+    outstanding: list[BrokerTransaction], cost: Decimal
+) -> list[BrokerTransaction]:
+    """Which held bills a purchase of `cost` was paid for with, if any.
+
+    A rolled ladder buys the next bill for exactly the face value that just
+    matured, which identifies the maturity date far more reliably than the
+    title does. Two bills merging into one purchase is common enough to match
+    for as well; beyond that the title takes over.
+    """
+    for bill in outstanding:
+        if bill.quantity == cost:
+            return [bill]
+    for first, second in combinations(outstanding, 2):
+        if first.quantity + second.quantity == cost:  # type: ignore[operator]
+            return [first, second]
+    return []
+
+
+def _tbill_redemptions(
+    transactions: list[BrokerTransaction], today: date
+) -> list[BrokerTransaction]:
+    """Reconstruct the redemption rows Freetrade leaves out of its exports."""
+    bills = [t for t in transactions if _is_tbill_purchase(t)]
+    if not bills:
+        return []
+
+    matured: list[tuple[BrokerTransaction, date]] = []
+    outstanding: list[BrokerTransaction] = []
+    for bill in bills:  # read_transactions returns oldest first
+        for funder in _funded_by(outstanding, -bill.amount):  # type: ignore[operator]
+            matured.append((funder, bill.date))
+            outstanding.remove(funder)
+        outstanding.append(bill)
+
+    # Whatever is left either matured after the last purchase in the file or is
+    # still held. Only the former gets a redemption.
+    for bill in outstanding:
+        maturity = _tbill_title_maturity(bill) or bill.date + _TBILL_ASSUMED_TERM
+        if maturity <= today:
+            matured.append((bill, maturity))
+
+    redemptions = [
+        BrokerTransaction(
+            date=redeemed_on,
+            action=ActionType.SELL,
+            symbol=bill.symbol,
+            description=f"{bill.description} redeemed at face value",
+            quantity=bill.quantity,
+            price=Decimal(1),
+            fees=Decimal(0),
+            amount=bill.quantity,
+            currency=CurrencyCode("GBP"),
+            broker=BROKER_NAME,
+            isin=bill.isin,
+        )
+        for bill, redeemed_on in matured
+    ]
+    LOGGER.warning(
+        "Freetrade exports carry no Treasury bill maturities, so %d redemptions "
+        "totalling %s GBP were reconstructed from the purchases they funded. The "
+        "discount to face is the return on the bill.",
+        len(redemptions),
+        sum(t.amount for t in redemptions),  # type: ignore[misc]
+    )
+    return redemptions
+
+
+def _with_tbill_redemptions(
+    transactions: list[BrokerTransaction], today: date | None = None
+) -> list[BrokerTransaction]:
+    """Merge reconstructed redemptions in, each ahead of same-day rows.
+
+    A bill's face value pays for the next bill on the day it matures, so the
+    redemption has to be seen before the purchase it funds; the calculator's
+    sort is stable, so this order survives it.
+    """
+    pending = sorted(
+        _tbill_redemptions(transactions, today or date.today()), key=lambda t: t.date
+    )
+    if not pending:
+        return transactions
+    merged: list[BrokerTransaction] = []
+    index = 0
+    for transaction in transactions:
+        while index < len(pending) and pending[index].date <= transaction.date:
+            merged.append(pending[index])
+            index += 1
+        merged.append(transaction)
+    merged.extend(pending[index:])
+    return merged
+
+
 def _withheld_tax_in_gbp(row: dict[str, str]) -> Decimal:
     """Tax withheld at source on an income row, 0 where the column is blank."""
     if row[FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT] == "":
@@ -351,7 +494,7 @@ class FreetradeParser(BaseSingleFileParser):
                 raise
             except ValueError as err:
                 raise ParsingError(file_path, str(err), row_index=index) from err
-        return transactions
+        return _with_tbill_redemptions(transactions)
 
     @staticmethod
     def _validate_header(header: list[str], file: Path) -> None:
