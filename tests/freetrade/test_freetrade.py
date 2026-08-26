@@ -352,14 +352,60 @@ def test_read_freetrade_bond_interest(tmp_path: Path) -> None:
     assert transaction.currency == "GBP"
 
 
-def test_read_freetrade_bond_interest_with_tax_withheld_is_rejected(
+def test_read_freetrade_bond_interest_with_tax_withheld_is_grossed_up(
     tmp_path: Path,
 ) -> None:
-    """Total Amount would be net of tax; refuse rather than under-report."""
+    """Total Amount is net of tax: the interest is rebuilt gross and the tax kept."""
     path = _write_csv(tmp_path, COLUMNS, [_bond_interest_row(withheld="2.12")])
 
-    with pytest.raises(ParsingError, match="Tax withheld on a Freetrade INTEREST row"):
-        FreetradeParser().load_from_file(path)
+    interest, tax = FreetradeParser().load_from_file(path)
+
+    assert interest.action is ActionType.INTEREST
+    assert interest.amount == Decimal("12.74")
+    assert tax.action is ActionType.INTEREST_TAX
+    assert tax.amount == Decimal("-2.12")
+    assert tax.symbol == interest.symbol == "TN28"
+    assert tax.isin == interest.isin
+    assert tax.date == interest.date
+
+
+def _property_income_row() -> list[str]:
+    """Build a REIT property income distribution row: 20% tax withheld."""
+    return _row_from_values(
+        {
+            FreetradeColumn.TITLE.value: "Primary Health",
+            FreetradeColumn.TYPE.value: "PROPERTY",
+            FreetradeColumn.TIMESTAMP.value: "2026-05-08T16:08:00.000Z",
+            FreetradeColumn.ACCOUNT_CURRENCY.value: "GBP",
+            FreetradeColumn.TOTAL_AMOUNT.value: "64.51",
+            FreetradeColumn.TICKER.value: "PHP",
+            FreetradeColumn.ISIN.value: "GB00BYRJ5J14",
+            FreetradeColumn.QUANTITY.value: "6086.00000000",
+            FreetradeColumn.INSTRUMENT_CURRENCY.value: "GBP",
+            FreetradeColumn.DIVIDEND_EX_DATE.value: "2026-03-26",
+            FreetradeColumn.DIVIDEND_PAY_DATE.value: "2026-05-08",
+            FreetradeColumn.DIVIDEND_ELIGIBLE_QUANTITY.value: "6086.00000000",
+            FreetradeColumn.DIVIDEND_AMOUNT_PER_SHARE.value: "0.01325000",
+            FreetradeColumn.DIVIDEND_WITHHELD_PERCENTAGE.value: "20",
+            FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT.value: "16.13",
+        }
+    )
+
+
+def test_read_freetrade_property_income_keeps_withheld_tax(tmp_path: Path) -> None:
+    """A PID is booked gross, with the tax the REIT withheld alongside."""
+    path = _write_csv(tmp_path, COLUMNS, [_property_income_row()])
+
+    income, tax = FreetradeParser().load_from_file(path)
+
+    assert income.action is ActionType.INTEREST
+    assert income.amount == Decimal("80.64")
+    assert income.symbol == "PHP"
+    assert income.currency == "GBP"
+    assert tax.action is ActionType.INTEREST_TAX
+    assert tax.amount == Decimal("-16.13")
+    assert tax.symbol == "PHP"
+    assert tax.isin == "GB00BYRJ5J14"
 
 
 def test_read_freetrade_share_lending_income(tmp_path: Path) -> None:

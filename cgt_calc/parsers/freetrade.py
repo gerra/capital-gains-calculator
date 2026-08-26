@@ -147,6 +147,8 @@ def _action_from_str(action_type: str, buy_sell: str, file: Path) -> ActionType:
     if action_type == "PROPERTY":
         # REIT Property Income Distributions are not qualifying dividends;
         # they are taxed as property income, so keep them out of dividends.
+        # Total Amount is net of the 20% basic-rate tax the REIT withholds,
+        # which the row also states.
         return ActionType.INTEREST
     if action_type in {"TOP_UP", "WITHDRAWAL"}:
         return ActionType.TRANSFER
@@ -203,23 +205,15 @@ class FreetradeTransaction(BrokerTransaction):
             quantity, price = None, None
             currency = CurrencyCode("GBP")
         elif action in {ActionType.TRANSFER, ActionType.INTEREST}:
-            amount = _parse_decimal(row, FreetradeColumn.TOTAL_AMOUNT)
+            # Total Amount is the cash that arrived. On a row laid out like a
+            # dividend (a coupon, a REIT distribution) that is net of any tax
+            # withheld, so the gross income is rebuilt from the withheld
+            # figure, which the tax-at-source transaction then carries back.
+            amount = _parse_decimal(
+                row, FreetradeColumn.TOTAL_AMOUNT
+            ) + _withheld_tax_in_gbp(row)
             quantity, price = None, None
             currency = CurrencyCode("GBP")
-            if (
-                row[FreetradeColumn.TYPE] == "INTEREST"
-                and _parse_optional_decimal(
-                    row, FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT
-                )
-                != 0
-            ):
-                # Total Amount is then net of the tax withheld and the gross
-                # figure would have to be rebuilt. Refuse rather than
-                # under-report the interest.
-                raise ParsingError(
-                    file,
-                    "Tax withheld on a Freetrade INTEREST row is not supported",
-                )
         else:
             raise UnsupportedBrokerActionError(
                 file, BROKER_NAME, row[FreetradeColumn.TYPE]
@@ -262,24 +256,37 @@ class FreetradeTransaction(BrokerTransaction):
         )
 
 
-def _dividend_tax_transaction(
+def _withheld_tax_in_gbp(row: dict[str, str]) -> Decimal:
+    """Tax withheld at source on an income row, 0 where the column is blank."""
+    if row[FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT] == "":
+        return Decimal(0)
+    return _dividend_amount_in_gbp(row, FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT)
+
+
+# The tax-at-source action that pairs with each income action.
+TAX_ACTIONS: Final[dict[ActionType, ActionType]] = {
+    ActionType.DIVIDEND: ActionType.DIVIDEND_TAX,
+    ActionType.INTEREST: ActionType.INTEREST_TAX,
+}
+
+
+def _tax_at_source_transaction(
     transaction: FreetradeTransaction, row: dict[str, str]
 ) -> BrokerTransaction | None:
-    """Create the tax-at-source cash movement carried on a dividend row."""
-    if transaction.action is not ActionType.DIVIDEND:
+    """Create the tax-at-source cash movement carried on an income row."""
+    tax_action = TAX_ACTIONS.get(transaction.action)
+    if tax_action is None:
         return None
 
-    if row[FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT] == "":
-        return None
-    amount = _dividend_amount_in_gbp(row, FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT)
+    amount = _withheld_tax_in_gbp(row)
     if amount == 0:
         return None
 
     return BrokerTransaction(
         date=transaction.date,
-        action=ActionType.DIVIDEND_TAX,
+        action=tax_action,
         symbol=transaction.symbol,
-        description=f"{row[FreetradeColumn.TITLE]} {ActionType.DIVIDEND_TAX}",
+        description=f"{row[FreetradeColumn.TITLE]} {tax_action}",
         quantity=None,
         price=None,
         fees=Decimal(0),
@@ -332,9 +339,9 @@ class FreetradeParser(BaseSingleFileParser):
             try:
                 transaction = FreetradeTransaction(row, file_path)
                 transactions.append(transaction)
-                dividend_tax = _dividend_tax_transaction(transaction, row)
-                if dividend_tax is not None:
-                    transactions.append(dividend_tax)
+                tax_at_source = _tax_at_source_transaction(transaction, row)
+                if tax_at_source is not None:
+                    transactions.append(tax_at_source)
             except ParsingError as err:
                 err.add_row_context(index)
                 raise
