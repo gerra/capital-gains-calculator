@@ -190,13 +190,18 @@ def test_read_freetrade_transactions_missing_column(tmp_path: Path) -> None:
         FreetradeParser().load_from_file(path)
 
 
-def test_read_freetrade_transactions_unknown_column(tmp_path: Path) -> None:
-    """Unknown columns trigger ParsingError."""
+def test_read_freetrade_transactions_unknown_column(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Unknown columns are tolerated with a warning, not rejected."""
     header = [*COLUMNS, "Unexpected"]
     path = _write_csv(tmp_path, header)
 
-    with pytest.raises(ParsingError, match="Unknown columns: Unexpected"):
+    with caplog.at_level(logging.WARNING, logger="cgt_calc.parsers.freetrade"):
         FreetradeParser().load_from_file(path)
+
+    assert "Unknown columns" in caplog.text
+    assert "Unexpected" in caplog.text
 
 
 def test_read_freetrade_transactions_invalid_decimal(tmp_path: Path) -> None:

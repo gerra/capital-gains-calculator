@@ -99,9 +99,8 @@ def _parse_optional_decimal(row: dict[str, str], column: FreetradeColumn) -> Dec
     return _parse_decimal(row, column)
 
 
-def _dividend_amount_in_gbp(row: dict[str, str], column: FreetradeColumn) -> Decimal:
-    """Convert a dividend field from instrument currency to account currency."""
-    amount = _parse_decimal(row, column)
+def _instrument_amount_in_gbp(row: dict[str, str], amount: Decimal) -> Decimal:
+    """Convert an instrument-currency amount to account currency."""
     if amount != 0:
         instrument_currency = CurrencyCode(row[FreetradeColumn.INSTRUMENT_CURRENCY])
         if instrument_currency != "GBP":
@@ -111,12 +110,31 @@ def _dividend_amount_in_gbp(row: dict[str, str], column: FreetradeColumn) -> Dec
     return amount
 
 
+def _dividend_amount_in_gbp(row: dict[str, str], column: FreetradeColumn) -> Decimal:
+    """Convert a dividend field from instrument currency to account currency."""
+    return _instrument_amount_in_gbp(row, _parse_decimal(row, column))
+
+
+def _dividend_gross_in_gbp(row: dict[str, str]) -> Decimal:
+    """Gross dividend in GBP, rebuilt from per-share figures when left blank."""
+    if row[FreetradeColumn.DIVIDEND_GROSS_AMOUNT] != "":
+        return _dividend_amount_in_gbp(row, FreetradeColumn.DIVIDEND_GROSS_AMOUNT)
+    amount = _parse_decimal(
+        row, FreetradeColumn.DIVIDEND_ELIGIBLE_QUANTITY
+    ) * _parse_decimal(row, FreetradeColumn.DIVIDEND_AMOUNT_PER_SHARE)
+    return _instrument_amount_in_gbp(row, amount)
+
+
 def _action_from_str(action_type: str, buy_sell: str, file: Path) -> ActionType:
     """Infer action type."""
     if action_type == "INTEREST_FROM_CASH":
         return ActionType.INTEREST
     if action_type == "DIVIDEND":
         return ActionType.DIVIDEND
+    if action_type == "PROPERTY":
+        # REIT Property Income Distributions are not qualifying dividends;
+        # they are taxed as property income, so keep them out of dividends.
+        return ActionType.INTEREST
     if action_type in {"TOP_UP", "WITHDRAWAL"}:
         return ActionType.TRANSFER
     if action_type in {"ORDER", "FREESHARE_ORDER"}:
@@ -139,9 +157,9 @@ class FreetradeTransaction(BrokerTransaction):
             row[FreetradeColumn.TYPE], row[FreetradeColumn.BUY_SELL], file
         )
 
-        symbol = (
-            row[FreetradeColumn.TICKER] if row[FreetradeColumn.TICKER] != "" else None
-        )
+        # Some rows carry no ticker (delisted or renamed lines); fall back to
+        # the ISIN so the transaction still has a symbol.
+        symbol = row[FreetradeColumn.TICKER] or row[FreetradeColumn.ISIN] or None
         if symbol is None and action not in {ActionType.TRANSFER, ActionType.INTEREST}:
             raise ParsingError(file, f"No symbol for action: {action}")
 
@@ -167,7 +185,7 @@ class FreetradeTransaction(BrokerTransaction):
             ) + _parse_optional_decimal(row, FreetradeColumn.FX_FEE_AMOUNT)
             currency = CurrencyCode("GBP")
         elif action == ActionType.DIVIDEND:
-            amount = _dividend_amount_in_gbp(row, FreetradeColumn.DIVIDEND_GROSS_AMOUNT)
+            amount = _dividend_gross_in_gbp(row)
             quantity, price = None, None
             currency = CurrencyCode("GBP")
         elif action in {ActionType.TRANSFER, ActionType.INTEREST}:
@@ -312,4 +330,4 @@ class FreetradeParser(BaseSingleFileParser):
         }
         if unknown:
             unknown_columns = ", ".join(sorted(unknown))
-            raise ParsingError(file, f"Unknown columns: {unknown_columns}", row_index=1)
+            LOGGER.warning("Unknown columns in %s: %s", file, unknown_columns)
