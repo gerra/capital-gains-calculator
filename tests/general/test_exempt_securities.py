@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import datetime
 from decimal import Decimal
+import logging
 from pathlib import Path
 
 import pytest
 
 from cgt_calc.currency_converter import CurrencyConverter
 from cgt_calc.current_price_fetcher import CurrentPriceFetcher
+from cgt_calc.exceptions import CalculatedAmountDiscrepancyError
 from cgt_calc.initial_prices import InitialPrices
 from cgt_calc.isin_converter import IsinConverter
 from cgt_calc.main import CapitalGainsCalculator
@@ -134,3 +136,42 @@ def test_exempt_names_are_case_insensitive(name: str) -> None:
     calc.convert_to_hmrc_transactions(gilt_round_trip(isin=GILT_ISIN))
 
     assert calc.exempt_symbols == {GILT}
+
+
+def dirty_price_round_trip() -> list[BrokerTransaction]:
+    """Trade the gilt at a dirty price: the cash carries accrued interest."""
+    return [
+        # 100 x 0.94 = 94.00 clean, 95.04 paid: 1.04 of accrued interest.
+        transaction(BUY_DAY, ActionType.BUY, GILT, 100, 0.94, 0, -95.04, GBP),
+        # 100 x 0.95 = 95.00 clean, 95.20 received: 0.20 of accrued interest.
+        transaction(SELL_DAY, ActionType.SELL, GILT, 100, 0.95, 0, 95.20, GBP),
+    ]
+
+
+def test_accrued_interest_on_exempt_trades_is_noted_not_refused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A gilt's dirty-price cash amounts are accepted, with the accrued interest logged."""
+    calc = calculator([GILT])
+    with caplog.at_level(logging.WARNING, logger="cgt_calc.main"):
+        calc.convert_to_hmrc_transactions(dirty_price_round_trip())
+    report = calc.calculate_capital_gain()
+
+    assert report.disposal_count == 0
+    assert report.exempt_disposal_count() == 1
+    assert (
+        "Accrued interest of 1.04 GBP in the purchase of exempt security TN28 on "
+        "2024-06-15: supplied=-95.04, calculated=-94.00."
+    ) in caplog.text
+    assert (
+        "Accrued interest of 0.20 GBP in the sale of exempt security TN28 on "
+        "2024-08-25: supplied=95.20, calculated=95.00."
+    ) in caplog.text
+    assert "Amount discrepancy" not in caplog.text
+
+
+def test_dirty_price_purchase_is_still_refused_when_not_exempt() -> None:
+    """Only an exempt security may pay more than nominal times price."""
+    calc = calculator([])
+    with pytest.raises(CalculatedAmountDiscrepancyError):
+        calc.convert_to_hmrc_transactions(dirty_price_round_trip())

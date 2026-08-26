@@ -371,7 +371,11 @@ class CapitalGainsCalculator:
                 transaction.fees,
                 CalculationType.ACQUISITION,
             ):
-                raise CalculatedAmountDiscrepancyError(transaction, -calculated_amount)
+                if symbol not in self.exempt_symbols:
+                    raise CalculatedAmountDiscrepancyError(
+                        transaction, -calculated_amount
+                    )
+                self._warn_accrued_interest(transaction, -calculated_amount)
             amount = -amount
 
         self.portfolio[symbol] += Position(quantity, amount)
@@ -571,15 +575,19 @@ class CapitalGainsCalculator:
             transaction.fees,
             CalculationType.DISPOSAL,
         ):
-            # Use calculated amount for CGT (e.g., Sell to Cover where tax is withheld)
-            LOGGER.warning(
-                "Amount discrepancy for %s: supplied=%s, calculated=%s. "
-                "Using calculated amount for CGT purposes.",
-                transaction,
-                amount,
-                calculated_amount,
-            )
-            amount = calculated_amount
+            if symbol in self.exempt_symbols:
+                self._warn_accrued_interest(transaction, calculated_amount)
+            else:
+                # Use calculated amount for CGT (e.g., Sell to Cover where tax
+                # is withheld)
+                LOGGER.warning(
+                    "Amount discrepancy for %s: supplied=%s, calculated=%s. "
+                    "Using calculated amount for CGT purposes.",
+                    transaction,
+                    amount,
+                    calculated_amount,
+                )
+                amount = calculated_amount
         add_to_list(
             self.disposal_list,
             transaction.date,
@@ -729,6 +737,33 @@ class CapitalGainsCalculator:
             self.currency_converter.to_gbp_for(transaction.fees, transaction),
         )
         self.gift_disposals[transaction.date, symbol] = connected
+
+    @staticmethod
+    def _warn_accrued_interest(
+        transaction: BrokerTransaction, calculated_amount: Decimal
+    ) -> None:
+        """Note the accrued interest in the cash amount of a gilt trade.
+
+        A gilt trades at a dirty price: the cash paid or received is the
+        clean price times the nominal plus the interest accrued since the
+        last coupon. The accrued part is not part of the capital gains
+        computation (and the security is exempt anyway); it may instead be
+        charged or relieved as income under the Accrued Income Scheme. The
+        supplied cash amount is kept so that the balance still reconciles.
+        """
+        amount = get_amount_or_fail(transaction)
+        LOGGER.warning(
+            "Accrued interest of %s %s in the %s of exempt security %s on %s: "
+            "supplied=%s, calculated=%s. Not part of the capital gains "
+            "computation; the Accrued Income Scheme may apply.",
+            round_decimal(abs(amount - calculated_amount), 2),
+            transaction.currency,
+            "purchase" if transaction.action is ActionType.BUY else "sale",
+            transaction.symbol,
+            transaction.date,
+            round_decimal(amount, 2),
+            round_decimal(calculated_amount, 2),
+        )
 
     def _note_exempt_symbol(self, transaction: BrokerTransaction) -> None:
         """Record the symbol of a security named in exempt_securities."""
