@@ -10,6 +10,7 @@
 \BLOCK{ set gift_loss = namespace(value=Decimal(0)) }
 \BLOCK{ set acquisition_count = namespace(value=0) }
 \BLOCK{ set disposal_count = namespace(value=0) }
+\BLOCK{ set exempt_count = namespace(value=0) }
 \BLOCK{ set dividend_count = namespace(value=0) }
 \BLOCK{ set interest_count = namespace(value=0) }
 \BLOCK{ set interest_tax_count = namespace(value=0) }
@@ -48,6 +49,9 @@
     \BLOCK{ set symbol = symbol[17:] }
     \BLOCK{ set is_disposal = True }
     \BLOCK{ set is_gift = True }
+\BLOCK{ elif symbol.startswith("exempt$") }
+    \BLOCK{ set symbol = symbol[7:] }
+    \BLOCK{ set is_exempt = True }
 \BLOCK{ endif }
 \BLOCK{ set overall_quantity = entries|sum(attribute="quantity") }
 \BLOCK{ set overall_fees = round_decimal(entries|sum(attribute="fees"), 2) }
@@ -83,6 +87,17 @@
         \BLOCK{ set total_loss.value = total_loss.value - overall_gain }
         Capital loss to date is £\VAR{ "{:,}".format(total_loss.value) }
     \BLOCK{ endif }
+\BLOCK{ elif is_exempt } % if is_exempt
+    \BLOCK{ set overall_disposed = round_decimal(entries|sum(attribute="amount") + entries|sum(attribute="fees"), 2) }
+    \BLOCK{ set overall_gain = round_decimal(entries|sum(attribute="gain"), 2) }
+    \BLOCK{ set exempt_count.value = exempt_count.value + 1 }
+    \subsubsection*{
+        Exempt disposal \VAR{ exempt_count.value }: \VAR{ strip_zeros(overall_quantity) } units of \VAR{ symbol } for £\VAR{ "{:,}".format(overall_disposed) }
+        (£\VAR{ "{:,}".format(round_decimal(overall_disposed/overall_quantity, 2)) }/unit)%
+    }
+    Exempt from capital gains tax (a gilt or other security within TCGA 1992 s115):
+    the \BLOCK{ if overall_gain >= 0 }gain of £\VAR{ "{:,}".format(overall_gain) }\BLOCK{ else }loss of £\VAR{ "{:,}".format(-overall_gain) }\BLOCK{ endif }
+    is neither chargeable nor allowable and is left out of the totals.
 \BLOCK{ elif is_aquisition } % if is_aquisition
     \BLOCK{ set acquisition_cost = round_decimal(entries[0].allowable_cost, 2) }
     \BLOCK{ if overall_quantity > 0 }
@@ -273,6 +288,9 @@
 \subsection*{Losses on gifts, kept separate: £\VAR{ "{:,}".format(gift_loss.value) }}
 \BLOCK{ endif }
 \subsection*{Total capital gain after loss: £\VAR{ "{:,}".format(total_gain.value - total_loss.value) }}
+\BLOCK{ if exempt_count.value > 0 }
+\subsection*{Exempt disposals, not chargeable: \VAR{ exempt_count.value } (£\VAR{ "{:,}".format(report.exempt_disposal_proceeds()) } proceeds)}
+\BLOCK{ endif }
 \vspace{1em}
 Amounts are rounded to the nearest penny individually, so a line may differ from its components by a penny.
 \vspace{2em}

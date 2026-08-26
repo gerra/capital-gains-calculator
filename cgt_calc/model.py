@@ -555,6 +555,35 @@ class CapitalGainsReport:
             Decimal(0),
         )
 
+    def exempt_disposals(
+        self,
+    ) -> list[tuple[datetime.date, str, list[CalculationEntry]]]:
+        """Disposals of exempt securities (gilts etc.), listed but not charged."""
+        return [
+            (date, key.partition("$")[2], entries)
+            for date, data in self.calculation_log.items()
+            for key, entries in data.items()
+            if key.startswith("exempt$")
+        ]
+
+    def exempt_disposal_count(self) -> int:
+        """Count the disposals of exempt securities in the year."""
+        return len(self.exempt_disposals())
+
+    def exempt_disposal_proceeds(self) -> Decimal:
+        """Proceeds of exempt disposals, gross of fees, rounded to the penny."""
+        return round_decimal(
+            sum(
+                (
+                    entry.amount + entry.fees
+                    for _, _, entries in self.exempt_disposals()
+                    for entry in entries
+                ),
+                Decimal(0),
+            ),
+            2,
+        )
+
     def total_gain(self) -> Decimal:
         """Total capital gain."""
         return self.capital_gain + self.capital_loss
@@ -670,6 +699,19 @@ class CapitalGainsReport:
             ("Loss", f"£{-self.capital_loss:,}"),
             *([("Losses on gifts", f"£{-self.gift_loss:,}")] if self.gift_loss else []),
             ("Total gain", f"£{self.total_gain():,}"),
+            *(
+                [
+                    (
+                        "Exempt disposals",
+                        (
+                            f"{self.exempt_disposal_count()} "
+                            f"(£{self.exempt_disposal_proceeds():,}, not chargeable)"
+                        ),
+                    )
+                ]
+                if self.exempt_disposal_count()
+                else []
+            ),
         ]
         capital_notes: list[str] = []
         if self.capital_gain_allowance is not None:

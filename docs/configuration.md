@@ -34,3 +34,10 @@ The following configuration files and options allow you to customize the calcula
 - **Interest fund tickers.** Some bond funds and ETFs should be taxed as interest rather than
   dividends. Specify these funds via the `--interest-fund-tickers` CLI option, using a
   comma-separated list of ticker symbols.
+
+- **Exempt securities.** Gilts and UK Treasury bills are exempt from capital gains tax
+  (TCGA 1992 s115), but a broker export shows them as ordinary trades. Name them via the
+  `--exempt-securities` CLI option, as a comma-separated list of tickers or ISINs. Their
+  disposals are still listed in the report, marked as exempt, but the gains and losses on
+  them are left out of the chargeable totals. Interest on the gilts is taxed as usual, and
+  the Accrued Income Scheme may apply when more than £5,000 nominal is held.

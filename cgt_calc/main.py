@@ -196,11 +196,18 @@ class CapitalGainsCalculator:
         calc_unrealized_gains: bool = False,
         period_start: datetime.date | None = None,
         period_end: datetime.date | None = None,
+        exempt_securities: list[str] | None = None,
     ):
         """Create calculator object.
 
         period_start/period_end narrow the reporting window within the
         tax year, e.g. for the HMRC 2024/25 CGT adjustment calculation.
+
+        exempt_securities names, by ticker or ISIN, securities whose disposals
+        are exempt from capital gains tax (gilts and UK Treasury bills, TCGA
+        1992 s115). They are pooled and matched like any other holding so that
+        the report can list each disposal, but nothing they make or lose
+        reaches the chargeable totals.
         """
         self.tax_year = tax_year
         self.period_start = period_start
@@ -217,6 +224,10 @@ class CapitalGainsCalculator:
         self.balance_check = balance_check
         self.calc_unrealized_gains = calc_unrealized_gains
         self.interest_fund_tickers = interest_fund_tickers
+        self.exempt_securities = {name.upper() for name in exempt_securities or []}
+        # Symbols matched to exempt_securities by ticker or ISIN, filled in
+        # as the broker transactions are read.
+        self.exempt_symbols: set[str] = set()
         self.total_uk_interest = Decimal(0)
         self.total_foreign_interest = Decimal(0)
         self.total_interest_tax = Decimal(0)
@@ -707,12 +718,26 @@ class CapitalGainsCalculator:
         )
         self.gift_disposals[transaction.date, symbol] = connected
 
+    def _note_exempt_symbol(self, transaction: BrokerTransaction) -> None:
+        """Record the symbol of a security named in exempt_securities."""
+        if not self.exempt_securities or transaction.symbol is None:
+            return
+        names = {transaction.symbol.upper()}
+        if transaction.isin is not None:
+            names.add(transaction.isin.upper())
+        if names & self.exempt_securities:
+            self.exempt_symbols.add(transaction.symbol)
+
     def _disposal_log_prefix(self, date_index: datetime.date, symbol: str) -> str:
         """Name the kind of disposal recorded for a symbol on a day.
 
         A sale with a gift to someone unconnected is one ordinary disposal,
-        reported as a sale.
+        reported as a sale. A disposal of an exempt security is reported as
+        exempt whatever form it took: there is no chargeable gain or
+        allowable loss on it either way.
         """
+        if symbol in self.exempt_symbols:
+            return "exempt"
         key = (date_index, symbol)
         connected = self.gift_disposals.get(key)
         if connected:
@@ -1046,6 +1071,7 @@ class CapitalGainsCalculator:
 
         for transaction in transactions:
             self.isin_converter.add_from_transaction(transaction)
+            self._note_exempt_symbol(transaction)
 
         transactions = self._resolve_gifts(transactions)
 
@@ -2499,6 +2525,15 @@ class CapitalGainsCalculator:
                         self.process_disposal(symbol, date_index)
                     )
                     if date_index >= tax_year_start_index:
+                        prefix = self._disposal_log_prefix(date_index, symbol)
+                        calculation_log[date_index][f"{prefix}${symbol}"] = (
+                            calculation_entries
+                        )
+                        if prefix == "exempt":
+                            # Listed for the record only: a gilt or other
+                            # exempt security has no chargeable gain and no
+                            # allowable loss (TCGA 1992 s115).
+                            continue
                         disposal_count += 1
                         transaction_amount = self.disposal_list[date_index][
                             symbol
@@ -2536,10 +2571,6 @@ class CapitalGainsCalculator:
                         )
                         assert transaction_capital_gain == round_decimal(
                             calculated_gain, 2
-                        )
-                        prefix = self._disposal_log_prefix(date_index, symbol)
-                        calculation_log[date_index][f"{prefix}${symbol}"] = (
-                            calculation_entries
                         )
                         if transaction_capital_gain > 0:
                             capital_gain += transaction_capital_gain
@@ -2692,6 +2723,7 @@ def calculate_cgt(args: argparse.Namespace) -> None:
         calc_unrealized_gains=args.calc_unrealized_gains,
         period_start=args.period_from,
         period_end=args.period_to,
+        exempt_securities=args.exempt_securities,
     )
     # First pass converts broker transactions to HMRC transactions.
     # This means applying same day rule and collapsing all transactions with

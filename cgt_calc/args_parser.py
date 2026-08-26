@@ -156,6 +156,17 @@ Environment variables:
         default=[],
         help="tickers of bond funds/ETFs whose dividends are taxed as interest in the UK",
     )
+    calc_group.add_argument(
+        "--exempt-securities",
+        type=ticker_list_type,
+        metavar="TICKER_OR_ISIN[,...]",
+        default=[],
+        help=(
+            "tickers or ISINs of securities exempt from capital gains tax, such as "
+            "gilts and UK Treasury bills (TCGA 1992 s115): their disposals are "
+            "listed in the report but left out of the chargeable totals"
+        ),
+    )
 
     # Output Options
     output_group = parser.add_argument_group("Output")

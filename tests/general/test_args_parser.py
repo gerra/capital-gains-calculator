@@ -694,3 +694,17 @@ def test_from_rejects_invalid_date() -> None:
         parser.parse_args(["--from", "2024-13-01", "--to", "2024-12-31"])
 
     assert exc_info.value.code == 2
+
+
+def test_exempt_securities_parsed() -> None:
+    """Tickers and ISINs are split, trimmed and upper-cased."""
+    parser = create_parser()
+
+    args = parser.parse_args(["--exempt-securities", "tn28, gb00bp243m73"])
+
+    assert args.exempt_securities == ["TN28", "GB00BP243M73"]
+
+
+def test_exempt_securities_default_empty() -> None:
+    """Nothing is exempt unless named."""
+    assert create_parser().parse_args([]).exempt_securities == []
