@@ -80,6 +80,12 @@ IGNORED_TYPES: Final[frozenset[str]] = frozenset(
     {"MONTHLY_STATEMENT", "MONTHLY_SHARE_LENDING_STATEMENT", "TAX_CERTIFICATE"}
 )
 
+# Rows that move cash without a trade: Total Amount is the whole story and
+# a symbol is optional.
+CASH_ACTIONS: Final[frozenset[ActionType]] = frozenset(
+    {ActionType.TRANSFER, ActionType.INTEREST, ActionType.OTHER_INCOME}
+)
+
 
 def _parse_decimal(row: dict[str, str], column: FreetradeColumn) -> Decimal:
     """Parse Decimal value for column, raising ValueError with context on failure."""
@@ -135,21 +141,18 @@ def _action_from_str(action_type: str, buy_sell: str, file: Path) -> ActionType:
         # amount) but taxed as interest.
         return ActionType.INTEREST
     if action_type == "SHARE_LENDING_INCOME":
-        # Fees from Freetrade's share lending programme. Strictly miscellaneous
-        # income rather than interest (SA100 box 17, covered by the £1,000
-        # trading and miscellaneous income allowance); grouped with interest
-        # here, like PROPERTY below, because both are taxed at income tax
-        # rates rather than dividend rates and the calculator has no
-        # separate bucket for them.
-        return ActionType.INTEREST
+        # Fees from Freetrade's share lending programme: miscellaneous income
+        # rather than interest (SA100 box 17, covered by the £1,000 trading
+        # and miscellaneous income allowance).
+        return ActionType.OTHER_INCOME
     if action_type == "DIVIDEND":
         return ActionType.DIVIDEND
     if action_type == "PROPERTY":
         # REIT Property Income Distributions are not qualifying dividends;
-        # they are taxed as property income, so keep them out of dividends.
-        # Total Amount is net of the 20% basic-rate tax the REIT withholds,
-        # which the row also states.
-        return ActionType.INTEREST
+        # they are taxed as property income (SA100 box 17, with the 20%
+        # basic-rate tax the REIT withheld in box 19). Total Amount is net
+        # of that tax, which the row also states.
+        return ActionType.OTHER_INCOME
     if action_type in {"TOP_UP", "WITHDRAWAL"}:
         return ActionType.TRANSFER
     if action_type in {"ORDER", "FREESHARE_ORDER"}:
@@ -176,7 +179,7 @@ class FreetradeTransaction(BrokerTransaction):
         # fall back to the ISIN so the transaction still has a symbol. The
         # BrokerRegistry swaps it for the ticker once every row is loaded.
         symbol = row[FreetradeColumn.TICKER] or row[FreetradeColumn.ISIN] or None
-        if symbol is None and action not in {ActionType.TRANSFER, ActionType.INTEREST}:
+        if symbol is None and action not in CASH_ACTIONS:
             raise ParsingError(file, f"No symbol for action: {action}")
 
         # The importer and calculation path below use the exported GBP account
@@ -204,7 +207,7 @@ class FreetradeTransaction(BrokerTransaction):
             amount = _dividend_gross_in_gbp(row)
             quantity, price = None, None
             currency = CurrencyCode("GBP")
-        elif action in {ActionType.TRANSFER, ActionType.INTEREST}:
+        elif action in CASH_ACTIONS:
             # Total Amount is the cash that arrived. On a row laid out like a
             # dividend (a coupon, a REIT distribution) that is net of any tax
             # withheld, so the gross income is rebuilt from the withheld
@@ -267,6 +270,7 @@ def _withheld_tax_in_gbp(row: dict[str, str]) -> Decimal:
 TAX_ACTIONS: Final[dict[ActionType, ActionType]] = {
     ActionType.DIVIDEND: ActionType.DIVIDEND_TAX,
     ActionType.INTEREST: ActionType.INTEREST_TAX,
+    ActionType.OTHER_INCOME: ActionType.OTHER_INCOME_TAX,
 }
 
 

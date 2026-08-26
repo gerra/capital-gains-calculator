@@ -14,6 +14,8 @@
 \BLOCK{ set dividend_count = namespace(value=0) }
 \BLOCK{ set interest_count = namespace(value=0) }
 \BLOCK{ set interest_tax_count = namespace(value=0) }
+\BLOCK{ set other_income_count = namespace(value=0) }
+\BLOCK{ set other_income_tax_count = namespace(value=0) }
 \BLOCK{ set eri_count = namespace(value=0) }
 
 \section*{Capital Gains Events}
@@ -221,6 +223,12 @@
     \BLOCK{ if symbol.startswith("dividend$") }
         \BLOCK{ set symbol = symbol[9:] }
         \BLOCK{ set is_dividend = True }
+    \BLOCK{ elif symbol.startswith("otherIncomeTax$") }
+        \BLOCK{ set symbol = symbol[15:] }
+        \BLOCK{ set is_other_income_tax = True }
+    \BLOCK{ elif symbol.startswith("otherIncome$") }
+        \BLOCK{ set symbol = symbol[12:] }
+        \BLOCK{ set is_other_income = True }
     \BLOCK{ elif symbol.startswith("interestTax") }
         \BLOCK{ set symbol = symbol.split('$')[0][11:] }
         \BLOCK{ set is_interest_tax = True }
@@ -260,6 +268,12 @@
     \BLOCK{ elif is_interest_tax } % if is_interest_tax
         \BLOCK{ set interest_tax_count.value = interest_tax_count.value + 1 }
         \textbf{Interest tax \VAR{ interest_tax_str } \VAR{ interest_tax_count.value }:} \VAR{ symbol } for £\VAR{ "{:,}".format(round_decimal(entries[0].amount, 2)) }
+    \BLOCK{ elif is_other_income } % if is_other_income
+        \BLOCK{ set other_income_count.value = other_income_count.value + 1 }
+        \textbf{Other income \VAR{ other_income_count.value }:} \VAR{ symbol } for £\VAR{ "{:,}".format(round_decimal(entries[0].amount, 2)) }
+    \BLOCK{ elif is_other_income_tax } % if is_other_income_tax
+        \BLOCK{ set other_income_tax_count.value = other_income_tax_count.value + 1 }
+        \textbf{Tax on other income \VAR{ other_income_tax_count.value }:} \VAR{ symbol } for £\VAR{ "{:,}".format(round_decimal(entries[0].amount, 2)) }
     \BLOCK{ elif is_eri_tax } % if is_eri_tax
         \BLOCK{ if entries[0].eris[0].is_interest }
             \BLOCK{ set type_str = " (interest)" }
@@ -312,4 +326,12 @@ Amounts are rounded to the nearest penny individually, so a line may differ from
 \subsubsection*{   (including £\VAR{ "{:,}".format(round_decimal(report.total_eri_amount(is_interest=True), 2))} from excess reported income distributions)}
 \BLOCK{ endif }
 \subsection*{Total amount of interest tax paid: £\VAR{ "{:,}".format(report.total_interest_tax) }}
+\BLOCK{ if other_income_count.value > 0 or other_income_tax_count.value > 0 }
+\vspace{2em}
+\section*{Overall - Other Income}
+Income that is neither interest nor a dividend, such as property income distributions from a REIT or share-lending fees.
+\subsection*{Number of other income payments: \VAR{ other_income_count.value }}
+\subsection*{Total amount of other income: £\VAR{ "{:,}".format(report.total_other_income) }}
+\subsection*{Total amount of tax taken off other income: £\VAR{ "{:,}".format(report.total_other_income_tax) }}
+\BLOCK{ endif }
 \end{document}

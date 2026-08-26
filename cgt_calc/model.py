@@ -266,6 +266,11 @@ class ActionType(Enum):
     # exists so that a row which slips through is refused rather than booked
     # as an acquisition.
     CANCEL_BUY = 26
+    # Income taxed at income tax rates that is neither interest nor a
+    # dividend: a REIT property income distribution, a share-lending fee.
+    # Reported separately, as "other UK income" on the return.
+    OTHER_INCOME = 27
+    OTHER_INCOME_TAX = 28
 
 
 class CalculationType(Enum):
@@ -331,6 +336,8 @@ class RuleType(Enum):
     RENAME = 9
     INTEREST_TAX = 10
     TRANSFER_TO_SPOUSE = 11
+    OTHER_INCOME = 12
+    OTHER_INCOME_TAX = 13
 
 
 @dataclass
@@ -400,6 +407,8 @@ class CalculationEntry:
             RuleType.DIVIDEND,
             RuleType.INTEREST,
             RuleType.INTEREST_TAX,
+            RuleType.OTHER_INCOME,
+            RuleType.OTHER_INCOME_TAX,
             RuleType.EXCESS_REPORTED_INCOME_DISTRIBUTION,
             RuleType.RENAME,
         }:
@@ -521,6 +530,10 @@ class CapitalGainsReport:
     # Losses on gifts, kept out of capital_loss: a loss on a disposal to a
     # connected person is a clogged loss (TCGA 1992 s18(3)). Negative or zero.
     gift_loss: Decimal = Decimal(0)
+    # Income that is neither interest nor dividends (REIT property income
+    # distributions, share-lending fees) and the tax taken off it at source.
+    total_other_income: Decimal = Decimal(0)
+    total_other_income_tax: Decimal = Decimal(0)
 
     def period_label(self) -> str | None:
         """Label for a custom reporting period, None for a full tax year."""
@@ -766,6 +779,17 @@ class CapitalGainsReport:
             ("Dividends", dividends, []),
             ("Interest", interest, []),
         ]
+        if self.total_other_income or self.total_other_income_tax:
+            groups.append(
+                (
+                    "Other income",
+                    [
+                        ("Proceeds", f"£{self.total_other_income:,}"),
+                        ("Tax paid", f"£{self.total_other_income_tax:,}"),
+                    ],
+                    [],
+                )
+            )
 
         # Right-align values on one shared column across the whole summary so
         # the decimal points line up.

@@ -47,6 +47,9 @@ The importer recognises these literal values from the CSV's `Type` column:
 | `FREESHARE_ORDER`    | A `BUY` of the awarded shares with zero acquisition cost                             |
 | `DIVIDEND`           | Gross dividend income and any `Dividend Withheld Tax Amount` as tax at source        |
 | `INTEREST_FROM_CASH` | Interest income                                                                      |
+| `INTEREST`           | A coupon on a bond or gilt held directly: interest income, grossed up for any tax withheld |
+| `PROPERTY`           | A REIT property income distribution: other income, grossed up, with the 20% tax withheld as tax at source |
+| `SHARE_LENDING_INCOME` | Share-lending fees: other income (miscellaneous income, not interest)              |
 | `TOP_UP`             | Cash added to the broker balance                                                     |
 | `WITHDRAWAL`         | Cash removed from the broker balance                                                 |
 

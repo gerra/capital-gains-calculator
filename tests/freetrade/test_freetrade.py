@@ -398,18 +398,18 @@ def test_read_freetrade_property_income_keeps_withheld_tax(tmp_path: Path) -> No
 
     income, tax = FreetradeParser().load_from_file(path)
 
-    assert income.action is ActionType.INTEREST
+    assert income.action is ActionType.OTHER_INCOME
     assert income.amount == Decimal("80.64")
     assert income.symbol == "PHP"
     assert income.currency == "GBP"
-    assert tax.action is ActionType.INTEREST_TAX
+    assert tax.action is ActionType.OTHER_INCOME_TAX
     assert tax.amount == Decimal("-16.13")
     assert tax.symbol == "PHP"
     assert tax.isin == "GB00BYRJ5J14"
 
 
 def test_read_freetrade_share_lending_income(tmp_path: Path) -> None:
-    """Share lending fees are cash income with no instrument attached."""
+    """Share lending fees are other income with no instrument attached."""
     row = _row_from_values(
         {
             FreetradeColumn.TITLE.value: "Share Lending Income",
@@ -425,7 +425,7 @@ def test_read_freetrade_share_lending_income(tmp_path: Path) -> None:
 
     assert len(transactions) == 1
     transaction = transactions[0]
-    assert transaction.action is ActionType.INTEREST
+    assert transaction.action is ActionType.OTHER_INCOME
     assert transaction.symbol is None
     assert transaction.isin is None
     assert transaction.amount == Decimal("0.12")

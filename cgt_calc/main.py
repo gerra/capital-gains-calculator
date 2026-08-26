@@ -231,6 +231,8 @@ class CapitalGainsCalculator:
         self.total_uk_interest = Decimal(0)
         self.total_foreign_interest = Decimal(0)
         self.total_interest_tax = Decimal(0)
+        self.total_other_income = Decimal(0)
+        self.total_other_income_tax = Decimal(0)
 
         self.acquisition_list: HmrcTransactionLog = {}
         self.disposal_list: HmrcTransactionLog = {}
@@ -267,6 +269,16 @@ class CapitalGainsCalculator:
         ] = defaultdict(ForeignCurrencyAmount)
         self.interest_tax_list: dict[
             tuple[str, CurrencyCode, datetime.date], ForeignCurrencyAmount
+        ] = defaultdict(ForeignCurrencyAmount)
+        # Other income and the tax withheld on it, keyed by broker, the
+        # symbol it came from ("" for income with no instrument), currency
+        # and date. Reported per payment rather than per month, so that the
+        # source of each amount stays visible.
+        self.other_income_list: dict[
+            tuple[str, str, CurrencyCode, datetime.date], ForeignCurrencyAmount
+        ] = defaultdict(ForeignCurrencyAmount)
+        self.other_income_tax_list: dict[
+            tuple[str, str, CurrencyCode, datetime.date], ForeignCurrencyAmount
         ] = defaultdict(ForeignCurrencyAmount)
 
         # Log for the report section related only to interests and dividends
@@ -1067,6 +1079,10 @@ class CapitalGainsCalculator:
         dividends_tax: dict[tuple[str, CurrencyCode], Decimal] = defaultdict(Decimal)
         interests: dict[tuple[str, CurrencyCode], Decimal] = defaultdict(Decimal)
         interest_taxes: dict[tuple[str, CurrencyCode], Decimal] = defaultdict(Decimal)
+        other_incomes: dict[tuple[str, CurrencyCode], Decimal] = defaultdict(Decimal)
+        other_income_taxes: dict[tuple[str, CurrencyCode], Decimal] = defaultdict(
+            Decimal
+        )
         balance_history: list[Decimal] = []
 
         for transaction in transactions:
@@ -1152,6 +1168,13 @@ class CapitalGainsCalculator:
                 ] += ForeignCurrencyAmount(amount, transaction.currency)
                 if self.date_in_tax_year(transaction.date):
                     interest_taxes[transaction.broker, transaction.currency] += amount
+            elif transaction.action in {
+                ActionType.OTHER_INCOME,
+                ActionType.OTHER_INCOME_TAX,
+            }:
+                new_balance += self.add_other_income(
+                    transaction, other_incomes, other_income_taxes
+                )
             elif transaction.action is ActionType.RENAME:
                 self.add_rename(transaction)
             elif transaction.action in {
@@ -1220,6 +1243,8 @@ class CapitalGainsCalculator:
             dividends_tax,
             interests,
             interest_taxes,
+            other_incomes,
+            other_income_taxes,
         )
 
     def first_pass_report(
@@ -1229,6 +1254,8 @@ class CapitalGainsCalculator:
         dividends_tax: dict[tuple[str, CurrencyCode], Decimal],
         interests: dict[tuple[str, CurrencyCode], Decimal],
         interest_taxes: dict[tuple[str, CurrencyCode], Decimal],
+        other_incomes: dict[tuple[str, CurrencyCode], Decimal] | None = None,
+        other_income_taxes: dict[tuple[str, CurrencyCode], Decimal] | None = None,
     ) -> None:
         """Print the results of the first pass."""
         LOGGER.info(
@@ -1277,6 +1304,16 @@ class CapitalGainsCalculator:
             print()
             print(style_text("Interest taxes", colour=Style.BRIGHT, emoji="🧾"))
             for (broker, currency), amount in interest_taxes.items():
+                print(f"{bul}{broker}: {round_decimal(-amount, 2)} ({currency})")
+        if other_incomes:
+            print()
+            print(style_text("Other income", colour=Style.BRIGHT, emoji="🏢"))
+            for (broker, currency), amount in other_incomes.items():
+                print(f"{bul}{broker}: {round_decimal(amount, 2)} ({currency})")
+        if other_income_taxes:
+            print()
+            print(style_text("Other income taxes", colour=Style.BRIGHT, emoji="🧾"))
+            for (broker, currency), amount in other_income_taxes.items():
                 print(f"{bul}{broker}: {round_decimal(-amount, 2)} ({currency})")
         print()
 
@@ -2225,6 +2262,75 @@ class CapitalGainsCalculator:
                 )
             ]
 
+    def add_other_income(
+        self,
+        transaction: BrokerTransaction,
+        other_incomes: dict[tuple[str, CurrencyCode], Decimal],
+        other_income_taxes: dict[tuple[str, CurrencyCode], Decimal],
+    ) -> Decimal:
+        """Record other income, or the tax withheld on it; return the cash moved."""
+        amount = get_amount_or_fail(transaction)
+        is_tax = transaction.action is ActionType.OTHER_INCOME_TAX
+        entries = self.other_income_tax_list if is_tax else self.other_income_list
+        entries[
+            transaction.broker,
+            transaction.symbol or "",
+            transaction.currency,
+            transaction.date,
+        ] += ForeignCurrencyAmount(amount, transaction.currency)
+        if self.date_in_tax_year(transaction.date):
+            totals = other_income_taxes if is_tax else other_incomes
+            totals[transaction.broker, transaction.currency] += amount
+        return amount
+
+    def process_other_income(self) -> None:
+        """Process other income events and the tax withheld on them.
+
+        Each payment is logged on its own date under the symbol it came from,
+        or the broker where no instrument is attached, so the report can say
+        what the income was; the totals for the year are updated.
+        """
+        for (broker, label, currency, date), foreign_amount in sorted(
+            self.other_income_list.items()
+        ):
+            if not self.date_in_tax_year(date):
+                continue
+            gbp_amount = self.currency_converter.to_gbp(
+                foreign_amount.amount, currency, date
+            )
+            self.total_other_income += gbp_amount
+            self.calculation_log_yields[date][f"otherIncome${label or broker}"] = [
+                CalculationEntry(
+                    rule_type=RuleType.OTHER_INCOME,
+                    quantity=Decimal(1),
+                    amount=gbp_amount,
+                    new_quantity=Decimal(1),
+                    new_pool_cost=Decimal(0),
+                    fees=Decimal(0),
+                )
+            ]
+
+        for (broker, label, currency, date), foreign_amount in sorted(
+            self.other_income_tax_list.items()
+        ):
+            if not self.date_in_tax_year(date):
+                continue
+            # Withholding rows are negative; negate so a refund cancels out.
+            tax_amount = -self.currency_converter.to_gbp(
+                foreign_amount.amount, currency, date
+            )
+            self.total_other_income_tax += tax_amount
+            self.calculation_log_yields[date][f"otherIncomeTax${label or broker}"] = [
+                CalculationEntry(
+                    rule_type=RuleType.OTHER_INCOME_TAX,
+                    quantity=Decimal(1),
+                    amount=tax_amount,
+                    new_quantity=Decimal(1),
+                    new_pool_cost=Decimal(0),
+                    fees=Decimal(0),
+                )
+            ]
+
     def dividend_source_country(
         self, symbol: str, currency: CurrencyCode
     ) -> str | None:
@@ -2643,6 +2749,7 @@ class CapitalGainsCalculator:
 
         self.process_dividends()
         self.process_interests()
+        self.process_other_income()
 
         LOGGER.info(
             "\n%s\n",
@@ -2675,6 +2782,8 @@ class CapitalGainsCalculator:
             gift_loss=round_decimal(gift_loss, 2),
             period_start=self.period_start,
             period_end=self.period_end,
+            total_other_income=round_decimal(self.total_other_income, 2),
+            total_other_income_tax=round_decimal(self.total_other_income_tax, 2),
         )
 
     def make_portfolio_entry(
