@@ -548,7 +548,15 @@ class CapitalGainsCalculator:
             transaction.fees,
             CalculationType.DISPOSAL,
         ):
-            raise CalculatedAmountDiscrepancyError(transaction, calculated_amount)
+            # Use calculated amount for CGT (e.g., Sell to Cover where tax is withheld)
+            LOGGER.warning(
+                "Amount discrepancy for %s: supplied=%s, calculated=%s. "
+                "Using calculated amount for CGT purposes.",
+                transaction,
+                amount,
+                calculated_amount,
+            )
+            amount = calculated_amount
         add_to_list(
             self.disposal_list,
             transaction.date,
