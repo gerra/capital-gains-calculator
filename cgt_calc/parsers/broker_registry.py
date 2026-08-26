@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import logging
 import sys
 from typing import TYPE_CHECKING, ClassVar
@@ -78,6 +79,60 @@ def _resolve_isins(
         if symbol not in resolved and renamed_to.get(symbol) not in resolved
     )
     return isins, unmapped
+
+
+def _resolve_isin_placeholders(
+    transactions: list[BrokerTransaction], isin_converter: IsinConverter
+) -> None:
+    """Swap a symbol that is just the ISIN for the ticker the security trades as.
+
+    A parser that finds no ticker on a row (Freetrade leaves it blank on some
+    free share and delisted lines) falls back to the ISIN so the row still has
+    a symbol. Left like that, the row would pool separately from the same
+    security's other rows, and the ISIN converter would reject the ISIN as
+    linked to two tickers. The ticker comes from the nearest-dated row of the
+    run carrying the same ISIN, or failing that from the translation cache
+    when it knows exactly one; an ISIN known by nothing else keeps the
+    placeholder.
+    """
+    named: dict[Isin, list[BrokerTransaction]] = defaultdict(list)
+    for transaction in transactions:
+        isin, symbol = transaction.isin, transaction.symbol
+        if isin is not None and symbol and symbol != isin:
+            named[isin].append(transaction)
+
+    for transaction in transactions:
+        isin = transaction.isin
+        if isin is None or transaction.symbol != isin:
+            continue
+        ticker: str | None = None
+        if isin in named:
+            ticker = _nearest_dated(named[isin], transaction.date).symbol
+        else:
+            known = {
+                symbol
+                for symbol in isin_converter.data.get(isin, ())
+                if symbol and symbol != isin
+            }
+            if len(known) == 1:
+                (ticker,) = known
+        if ticker is None:
+            continue
+        LOGGER.info(
+            "%s %s row of %s carries no ticker; using %s",
+            transaction.date,
+            transaction.action.name,
+            isin,
+            ticker,
+        )
+        transaction.symbol = ticker
+
+
+def _nearest_dated(
+    rows: list[BrokerTransaction], date: datetime.date
+) -> BrokerTransaction:
+    """Pick the row dated closest to `date`, earliest then by symbol on a tie."""
+    return min(rows, key=lambda row: (abs(row.date - date), row.date, row.symbol or ""))
 
 
 def _transaction_sort_key(
@@ -163,6 +218,8 @@ class BrokerRegistry:
                     broker_class.pretty_name,
                 )
                 all_transactions += transactions
+
+        _resolve_isin_placeholders(all_transactions, isin_converter)
 
         # ERI transactions are appended after this count, so scope the wording.
         msg = f"Found {len(all_transactions)} broker transactions"

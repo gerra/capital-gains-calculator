@@ -170,8 +170,9 @@ class FreetradeTransaction(BrokerTransaction):
             row[FreetradeColumn.TYPE], row[FreetradeColumn.BUY_SELL], file
         )
 
-        # Some rows carry no ticker (delisted or renamed lines); fall back to
-        # the ISIN so the transaction still has a symbol.
+        # Some rows carry no ticker (free shares, delisted or renamed lines);
+        # fall back to the ISIN so the transaction still has a symbol. The
+        # BrokerRegistry swaps it for the ticker once every row is loaded.
         symbol = row[FreetradeColumn.TICKER] or row[FreetradeColumn.ISIN] or None
         if symbol is None and action not in {ActionType.TRANSFER, ActionType.INTEREST}:
             raise ParsingError(file, f"No symbol for action: {action}")
