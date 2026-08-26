@@ -77,7 +77,7 @@ STOCK_SPLIT_PREFIX: Final = "Stock Split "
 # These Activity Feed rows point to documents rather than cash or security
 # transactions. Freetrade includes them in an All Activity export.
 IGNORED_TYPES: Final[frozenset[str]] = frozenset(
-    {"MONTHLY_STATEMENT", "TAX_CERTIFICATE"}
+    {"MONTHLY_STATEMENT", "MONTHLY_SHARE_LENDING_STATEMENT", "TAX_CERTIFICATE"}
 )
 
 
@@ -128,6 +128,19 @@ def _dividend_gross_in_gbp(row: dict[str, str]) -> Decimal:
 def _action_from_str(action_type: str, buy_sell: str, file: Path) -> ActionType:
     """Infer action type."""
     if action_type == "INTEREST_FROM_CASH":
+        return ActionType.INTEREST
+    if action_type == "INTEREST":
+        # A coupon on a bond or gilt held directly, or an interest distribution
+        # from a bond fund. Laid out like a dividend row (ticker, per-share
+        # amount) but taxed as interest.
+        return ActionType.INTEREST
+    if action_type == "SHARE_LENDING_INCOME":
+        # Fees from Freetrade's share lending programme. Strictly miscellaneous
+        # income rather than interest (SA100 box 17, covered by the £1,000
+        # trading and miscellaneous income allowance); grouped with interest
+        # here, like PROPERTY below, because both are taxed at income tax
+        # rates rather than dividend rates and the calculator has no
+        # separate bucket for them.
         return ActionType.INTEREST
     if action_type == "DIVIDEND":
         return ActionType.DIVIDEND
@@ -192,6 +205,20 @@ class FreetradeTransaction(BrokerTransaction):
             amount = _parse_decimal(row, FreetradeColumn.TOTAL_AMOUNT)
             quantity, price = None, None
             currency = CurrencyCode("GBP")
+            if (
+                row[FreetradeColumn.TYPE] == "INTEREST"
+                and _parse_optional_decimal(
+                    row, FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT
+                )
+                != 0
+            ):
+                # Total Amount is then net of the tax withheld and the gross
+                # figure would have to be rebuilt. Refuse rather than
+                # under-report the interest.
+                raise ParsingError(
+                    file,
+                    "Tax withheld on a Freetrade INTEREST row is not supported",
+                )
         else:
             raise UnsupportedBrokerActionError(
                 file, BROKER_NAME, row[FreetradeColumn.TYPE]

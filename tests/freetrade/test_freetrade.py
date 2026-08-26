@@ -274,7 +274,10 @@ def test_read_freetrade_transactions_uses_uk_dates(
     assert transactions[0].date == expected
 
 
-@pytest.mark.parametrize("document_type", ["MONTHLY_STATEMENT", "TAX_CERTIFICATE"])
+@pytest.mark.parametrize(
+    "document_type",
+    ["MONTHLY_STATEMENT", "MONTHLY_SHARE_LENDING_STATEMENT", "TAX_CERTIFICATE"],
+)
 def test_read_freetrade_ignores_document_rows(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -300,6 +303,87 @@ def test_read_freetrade_ignores_document_rows(
     assert (
         f"Skipping non-transaction Freetrade row 3 ({document_type})" in caplog.messages
     )
+
+
+def _row_from_values(values: dict[str, str]) -> list[str]:
+    """Lay out a row with every unnamed column blank, as sparse export rows are."""
+    row = dict.fromkeys(COLUMNS, "")
+    row.update(values)
+    return [row[column] for column in COLUMNS]
+
+
+def _bond_interest_row(withheld: str = "0.00") -> list[str]:
+    """Build a gilt coupon row: dividend layout, INTEREST type."""
+    return _row_from_values(
+        {
+            FreetradeColumn.TITLE.value: "1/8% Gilt 2028",
+            FreetradeColumn.TYPE.value: "INTEREST",
+            FreetradeColumn.TIMESTAMP.value: "2026-07-31T15:57:00.000Z",
+            FreetradeColumn.ACCOUNT_CURRENCY.value: "GBP",
+            FreetradeColumn.TOTAL_AMOUNT.value: "10.62",
+            FreetradeColumn.TICKER.value: "TN28",
+            FreetradeColumn.ISIN.value: "GB00BMBL1G81",
+            FreetradeColumn.QUANTITY.value: "17005.77000000",
+            FreetradeColumn.INSTRUMENT_CURRENCY.value: "GBP",
+            FreetradeColumn.DIVIDEND_EX_DATE.value: "2026-07-22",
+            FreetradeColumn.DIVIDEND_PAY_DATE.value: "2026-07-31",
+            FreetradeColumn.DIVIDEND_ELIGIBLE_QUANTITY.value: "17005.77000000",
+            FreetradeColumn.DIVIDEND_AMOUNT_PER_SHARE.value: "0.00062500",
+            FreetradeColumn.DIVIDEND_WITHHELD_PERCENTAGE.value: "0",
+            FreetradeColumn.DIVIDEND_WITHHELD_AMOUNT.value: withheld,
+        }
+    )
+
+
+def test_read_freetrade_bond_interest(tmp_path: Path) -> None:
+    """A coupon on a directly held gilt is interest, not a dividend."""
+    path = _write_csv(tmp_path, COLUMNS, [_bond_interest_row()])
+
+    transactions = FreetradeParser().load_from_file(path)
+
+    assert len(transactions) == 1
+    transaction = transactions[0]
+    assert transaction.action is ActionType.INTEREST
+    assert transaction.symbol == "TN28"
+    assert transaction.isin == "GB00BMBL1G81"
+    assert transaction.amount == Decimal("10.62")
+    assert transaction.quantity is None
+    assert transaction.price is None
+    assert transaction.currency == "GBP"
+
+
+def test_read_freetrade_bond_interest_with_tax_withheld_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """Total Amount would be net of tax; refuse rather than under-report."""
+    path = _write_csv(tmp_path, COLUMNS, [_bond_interest_row(withheld="2.12")])
+
+    with pytest.raises(ParsingError, match="Tax withheld on a Freetrade INTEREST row"):
+        FreetradeParser().load_from_file(path)
+
+
+def test_read_freetrade_share_lending_income(tmp_path: Path) -> None:
+    """Share lending fees are cash income with no instrument attached."""
+    row = _row_from_values(
+        {
+            FreetradeColumn.TITLE.value: "Share Lending Income",
+            FreetradeColumn.TYPE.value: "SHARE_LENDING_INCOME",
+            FreetradeColumn.TIMESTAMP.value: "2026-08-17T15:35:09.138Z",
+            FreetradeColumn.ACCOUNT_CURRENCY.value: "GBP",
+            FreetradeColumn.TOTAL_AMOUNT.value: "0.12",
+        }
+    )
+    path = _write_csv(tmp_path, COLUMNS, [row])
+
+    transactions = FreetradeParser().load_from_file(path)
+
+    assert len(transactions) == 1
+    transaction = transactions[0]
+    assert transaction.action is ActionType.INTEREST
+    assert transaction.symbol is None
+    assert transaction.isin is None
+    assert transaction.amount == Decimal("0.12")
+    assert transaction.currency == "GBP"
 
 
 def test_read_freetrade_skips_blank_rows(tmp_path: Path) -> None:
